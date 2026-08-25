@@ -1,0 +1,146 @@
+# The factory's dispatcher, reusable. Call it from a repo's own thin
+# workflow on push (see templates/factory.yml). A push that flips a plan (or
+# a feature-folder member) to `ready` runs one matrix job per unit; a push
+# with no flip skips the paid job entirely. A plan flipped on its own branch
+# is implemented directly on that branch and PRs into the default branch; a
+# plan flipped on the default branch builds in a worktree on an impl/ branch.
+#
+# The factory repo itself is checked out at .factory/ inside every job, so
+# the caller repo carries no copies of the gate script, push wrapper, or
+# skills — updates here reach every caller on its next run.
+name: Factory Dispatch
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: "Runner label — match the caller's CI so verify can run"
+        type: string
+        default: ubuntu-latest
+      default_model:
+        description: "Model for plans with no model: frontmatter"
+        type: string
+        default: opus
+      default_effort:
+        description: "Effort for plans with no effort: frontmatter"
+        type: string
+        default: medium
+      max_turns:
+        description: "Turn budget per run — size for a feature, not an errand"
+        type: number
+        default: 250
+      verify_tools:
+        description: "Comma-separated extra allowlist entries for the repo's verify commands, e.g. Bash(pnpm install:*),Bash(pnpm test:*)"
+        type: string
+        default: ""
+      setup:
+        description: "Shell to provision the toolchain before the run (installs, caches)"
+        type: string
+        default: ""
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        description: "From `claude setup-token` — bills the Claude subscription"
+        required: true
+      FACTORY_PAT:
+        description: "Machine account's fine-grained PAT (Contents + Pull requests RW). Optional: without it, pushes and PRs fall back to GITHUB_TOKEN (bot-authored PRs, approval clicks)."
+        required: false
+
+jobs:
+  gate:
+    name: Which units became ready?
+    runs-on: ubuntu-latest
+    outputs:
+      units: ${{ steps.detect.outputs.units }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/checkout@v4
+        with:
+          repository: RatulMaharaj/factory
+          path: .factory
+
+      - id: detect
+        env:
+          DEFAULT_MODEL: ${{ inputs.default_model }}
+          DEFAULT_EFFORT: ${{ inputs.default_effort }}
+        run: |
+          units="$(node .factory/scripts/detect-ready-units.mjs '${{ github.event.before }}' '${{ github.sha }}')"
+          echo "units=$units" >> "$GITHUB_OUTPUT"
+          echo "Units to dispatch: $units"
+
+  implement:
+    name: ${{ matrix.unit.unit }}
+    needs: gate
+    if: needs.gate.outputs.units != '[]'
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        unit: ${{ fromJSON(needs.gate.outputs.units) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.FACTORY_PAT || github.token }}
+
+      - uses: actions/checkout@v4
+        with:
+          repository: RatulMaharaj/factory
+          path: .factory
+
+      # git-push.sh reads origin/HEAD to enforce its default-branch rule; a
+      # CI clone doesn't have it set.
+      - name: Set origin/HEAD for the push guard
+        run: git remote set-head origin --auto
+
+      - name: Provision the toolchain
+        if: inputs.setup != ''
+        run: ${{ inputs.setup }}
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Implement the unit
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN || github.token }}
+          PROMPT: |
+            You are a headless dispatched run: nobody is watching and nothing
+            can answer a question, so never ask one. Read
+            .factory/skills/pr/SKILL.md and follow it exactly. Your unit of
+            work has already been picked for you: ${{ matrix.unit.unit }}
+            (files: ${{ matrix.unit.files }}). You are on branch
+            ${{ github.ref_name }} at its tip. If that is the default
+            branch, follow the skill's worktree mode. Otherwise this is the
+            plan's own branch and the skill's branch mode applies: implement
+            directly on this checkout, commit to this branch, and open the
+            PR from it into the default branch. The .factory directory is
+            the factory's own tooling: never add, commit, or modify anything
+            under it. The ONLY way you may push is:
+            .factory/scripts/git-push.sh origin <branch> — plain git push
+            will be denied.
+        run: |
+          git config user.name "factory"
+          git config user.email "factory@users.noreply.github.com"
+          base_tools="Glob,Grep,LS,Read,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git branch:*),Bash(git add:*),Bash(git commit:*),Bash(git rm:*),Bash(git worktree:*),Bash(git fetch:*),Bash(git checkout:*),Bash(.factory/scripts/git-push.sh:*),Bash(gh pr create:*),Bash(gh pr list:*)"
+          extra="${{ inputs.verify_tools }}"
+          claude -p "$PROMPT" \
+            --model "${{ matrix.unit.model }}" \
+            --effort "${{ matrix.unit.effort }}" \
+            --output-format stream-json --verbose \
+            --max-turns "${{ inputs.max_turns }}" \
+            --permission-mode acceptEdits \
+            --allowedTools "${base_tools}${extra:+,$extra}" \
+            --disallowedTools "WebSearch,WebFetch" \
+            | tee "$RUNNER_TEMP/transcript.jsonl"
+
+      - name: Keep the transcript
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: transcript-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/transcript.jsonl
+          retention-days: 14

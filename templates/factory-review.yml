@@ -1,0 +1,15 @@
+# Codex reviews factory PRs; clean + green CI auto-merges them.
+name: Factory Review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  review:
+    uses: RatulMaharaj/factory/.github/workflows/review.yml@main
+    secrets: inherit
+    with:
+      ci_workflow: CI
+      # machine_account: LoopedAgent

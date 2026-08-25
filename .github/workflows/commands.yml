@@ -1,0 +1,155 @@
+# The factory's comment commands, reusable — dispatch from where the
+# conversation is. Call from a thin workflow on issue_comment (see
+# templates/factory-commands.yml).
+#
+#   /factory review                     on a PR: run the Codex review on it
+#   /factory implement [model] [effort] on an issue: treat the issue as the
+#                                       work order — a plan file, an
+#                                       implementation, a PR that closes it
+#
+# Only comments from users with write access count: a comment is a spend
+# button, exactly like the ready flip on the board.
+name: Factory Commands
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        type: string
+        default: ubuntu-latest
+      default_model:
+        type: string
+        default: opus
+      default_effort:
+        type: string
+        default: medium
+      max_turns:
+        type: number
+        default: 250
+      verify_tools:
+        type: string
+        default: ""
+      setup:
+        type: string
+        default: ""
+      ci_workflow:
+        type: string
+        default: CI
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        required: true
+      CODEX_AUTH_JSON:
+        required: false
+      FACTORY_PAT:
+        required: false
+
+jobs:
+  route:
+    name: Parse the command
+    if: >-
+      startsWith(github.event.comment.body, '/factory') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    outputs:
+      cmd: ${{ steps.parse.outputs.cmd }}
+      model: ${{ steps.parse.outputs.model }}
+      effort: ${{ steps.parse.outputs.effort }}
+    steps:
+      - id: parse
+        env:
+          BODY: ${{ github.event.comment.body }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -- $BODY
+          cmd="${2:-}"
+          case "$cmd" in review|implement) ;; *) echo "::notice::Unknown factory command '$cmd' — ignoring."; cmd="" ;; esac
+          model=""; effort=""
+          case "${3:-}" in haiku|sonnet|opus) model="$3" ;; esac
+          case "${4:-}" in low|medium|high|xhigh|max) effort="$4" ;; esac
+          echo "cmd=$cmd" >> "$GITHUB_OUTPUT"
+          echo "model=$model" >> "$GITHUB_OUTPUT"
+          echo "effort=$effort" >> "$GITHUB_OUTPUT"
+          gh api -X POST "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" -f content=eyes || true
+
+  review:
+    name: Review this PR
+    needs: route
+    if: needs.route.outputs.cmd == 'review' && github.event.issue.pull_request
+    uses: RatulMaharaj/factory/.github/workflows/review.yml@main
+    secrets: inherit
+    with:
+      pr: ${{ github.event.issue.number }}
+      ci_workflow: ${{ inputs.ci_workflow }}
+
+  implement:
+    name: "Implement issue #${{ github.event.issue.number }}"
+    needs: route
+    if: needs.route.outputs.cmd == 'implement' && !github.event.issue.pull_request
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.FACTORY_PAT || github.token }}
+
+      - uses: actions/checkout@v4
+        with:
+          repository: RatulMaharaj/factory
+          path: .factory
+
+      - name: Set origin/HEAD for the push guard
+        run: git remote set-head origin --auto
+
+      - name: Provision the toolchain
+        if: inputs.setup != ''
+        run: ${{ inputs.setup }}
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Implement the issue
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN || github.token }}
+          PROMPT: |
+            You are a headless dispatched run: nobody is watching and nothing
+            can answer a question, so never ask one. Read
+            .factory/skills/pr/SKILL.md and follow it exactly, in worktree
+            mode from the default branch's tip. Your unit of work is GitHub
+            issue #${{ github.event.issue.number }} — read it with:
+            gh issue view ${{ github.event.issue.number }}.
+            First act, in the worktree: write the issue into a plan file
+            plans/issue-${{ github.event.issue.number }}.md (status: busy, a
+            link to the issue, the issue's intent in its own words) so the
+            board records this work like any other — the plan file travels
+            in your branch, and its done flip does too; push no claim to the
+            default branch, the dispatch is the claim. Branch
+            impl/issue-${{ github.event.issue.number }}. The PR body must
+            include "Closes #${{ github.event.issue.number }}". The .factory
+            directory is the factory's own tooling: never add, commit, or
+            modify anything under it. The ONLY way you may push is:
+            .factory/scripts/git-push.sh origin <branch> — plain git push
+            will be denied.
+        run: |
+          git config user.name "factory"
+          git config user.email "factory@users.noreply.github.com"
+          base_tools="Glob,Grep,LS,Read,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git branch:*),Bash(git add:*),Bash(git commit:*),Bash(git rm:*),Bash(git worktree:*),Bash(git fetch:*),Bash(git checkout:*),Bash(.factory/scripts/git-push.sh:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh issue view:*)"
+          extra="${{ inputs.verify_tools }}"
+          claude -p "$PROMPT" \
+            --model "${{ needs.route.outputs.model || inputs.default_model }}" \
+            --effort "${{ needs.route.outputs.effort || inputs.default_effort }}" \
+            --output-format stream-json --verbose \
+            --max-turns "${{ inputs.max_turns }}" \
+            --permission-mode acceptEdits \
+            --allowedTools "${base_tools}${extra:+,$extra}" \
+            --disallowedTools "WebSearch,WebFetch" \
+            | tee "$RUNNER_TEMP/transcript.jsonl"
+
+      - name: Keep the transcript
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: transcript-issue-${{ github.event.issue.number }}
+          path: ${{ runner.temp }}/transcript.jsonl
+          retention-days: 14

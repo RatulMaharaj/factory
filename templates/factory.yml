@@ -1,0 +1,19 @@
+# The factory: a plan flipped to `ready` becomes a pull request.
+# Copy into .github/workflows/, adjust the inputs, add the secrets.
+name: Factory
+on:
+  push:
+    paths: ["plans/**"]
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  factory:
+    uses: RatulMaharaj/factory/.github/workflows/dispatch.yml@main
+    secrets: inherit
+    with:
+      # runner: macos-latest
+      # setup: |
+      #   corepack enable && pnpm install --frozen-lockfile
+      # verify_tools: "Bash(pnpm install:*),Bash(pnpm test:*),Bash(pnpm run:*)"
+      default_model: opus

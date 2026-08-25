@@ -1,0 +1,16 @@
+# /factory review on a PR, /factory implement [model] [effort] on an issue.
+name: Factory Commands
+on:
+  issue_comment:
+    types: [created]
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+jobs:
+  commands:
+    uses: RatulMaharaj/factory/.github/workflows/commands.yml@main
+    secrets: inherit
+    with:
+      ci_workflow: CI
+      # runner / setup / verify_tools: same as your Factory workflow
