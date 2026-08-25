@@ -75,7 +75,7 @@ jobs:
     name: Review this PR
     needs: route
     if: needs.route.outputs.cmd == 'review' && github.event.issue.pull_request
-    uses: RatulMaharaj/factory/.github/workflows/review.yml@main
+    uses: RatulMaharaj/factory/.github/workflows/review.yml@v1
     secrets: inherit
     with:
       pr: ${{ github.event.issue.number }}
