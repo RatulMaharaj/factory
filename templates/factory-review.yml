@@ -8,7 +8,7 @@ permissions:
   pull-requests: write
 jobs:
   review:
-    uses: RatulMaharaj/factory/.github/workflows/review.yml@main
+    uses: RatulMaharaj/factory/.github/workflows/review.yml@v1
     secrets: inherit
     with:
       ci_workflow: CI

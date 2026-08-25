@@ -9,7 +9,7 @@ permissions:
   issues: write
 jobs:
   commands:
-    uses: RatulMaharaj/factory/.github/workflows/commands.yml@main
+    uses: RatulMaharaj/factory/.github/workflows/commands.yml@v1
     secrets: inherit
     with:
       ci_workflow: CI
