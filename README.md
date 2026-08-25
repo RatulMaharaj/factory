@@ -15,11 +15,11 @@ at one end and reading the diff at the other.
 ```mermaid
 flowchart LR
     A["📝 you write a plan<br/><i>status: ready</i>"] --> B{{"gate<br/><i>did a status become ready?</i>"}}
-    B -- "no flip" --> Z(["skip - costs nothing"])
-    B -- "one job per unit" --> C["🤖 Claude implements<br/><i>branch, verify, PR</i>"]
-    C --> D["🔍 Codex reviews<br/><i>line-anchored findings</i>"]
+    B -- "no flip" --> Z(["skips"])
+    B -- "one job per unit" --> C["Claude implements<br/><i>branch, verify, PR</i>"]
+    C --> D["Codex reviews<br/><i>line-anchored findings</i>"]
     D -- "findings" --> E(["PR held open for you,<br/>with suggested changes"])
-    D -- "clean + CI green" --> F(["✅ auto-merged"])
+    D -- "clean + CI green" --> F(["auto-merged"])
 ```
 
 We built this for and alongside
@@ -32,11 +32,11 @@ frontmatter conventions, so you can use it without the app.
 Three reusable workflows. You call them from three thin files in your own
 repo:
 
-| You add | What it does | When it runs |
-| --- | --- | --- |
-| `factory.yml` → [`dispatch.yml`](.github/workflows/dispatch.yml) | Turns a plan flipped to `ready` into a pull request, one matrix job per unit, routed by the plan's `model:` and `effort:` frontmatter | when a push flips a plan to `ready`, on any branch |
-| `factory-review.yml` → [`review.yml`](.github/workflows/review.yml) | Has Codex review every factory PR, with findings anchored to their lines and one-click `suggestion` blocks; a clean verdict plus green CI squash-merges the PR | when a factory PR opens or updates |
-| `factory-commands.yml` → [`commands.yml`](.github/workflows/commands.yml) | `/factory implement [model] [effort]` turns an issue into a plan, an implementation and a PR that closes it; `/factory review` runs the review on any PR you point it at | when a user with write access comments |
+| You add                                                                   | What it does                                                                                                                                                             | When it runs                                       |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------- |
+| `factory.yml` → [`dispatch.yml`](.github/workflows/dispatch.yml)          | Turns a plan flipped to `ready` into a pull request, one matrix job per unit, routed by the plan's `model:` and `effort:` frontmatter                                    | when a push flips a plan to `ready`, on any branch |
+| `factory-review.yml` → [`review.yml`](.github/workflows/review.yml)       | Has Codex review every factory PR, with findings anchored to their lines and one-click `suggestion` blocks; a clean verdict plus green CI squash-merges the PR           | when a factory PR opens or updates                 |
+| `factory-commands.yml` → [`commands.yml`](.github/workflows/commands.yml) | `/factory implement [model] [effort]` turns an issue into a plan, an implementation and a PR that closes it; `/factory review` runs the review on any PR you point it at | when a user with write access comments             |
 
 Every run also comes with the following, and none of it needs configuring.
 
@@ -97,11 +97,11 @@ jobs:
 
 **2. Add the secrets:**
 
-| Secret | Where it comes from | Needed for |
-| --- | --- | --- |
-| `CLAUDE_CODE_OAUTH_TOKEN` | run `claude setup-token` locally | every implementation run |
-| `CODEX_AUTH_JSON` | run `codex login` locally, then save the contents of `~/.codex/auth.json` | review and auto-merge |
-| `FACTORY_PAT` | a machine account's fine-grained PAT (this repo; Contents and Pull requests read/write; the account a collaborator with write access) | recommended, see below |
+| Secret                    | Where it comes from                                                                                                                   | Needed for               |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
+| `CLAUDE_CODE_OAUTH_TOKEN` | run `claude setup-token` locally                                                                                                      | every implementation run |
+| `CODEX_AUTH_JSON`         | run `codex login` locally, then save the contents of `~/.codex/auth.json`                                                             | review and auto-merge    |
+| `FACTORY_PAT`             | a machine account's fine-grained PAT (this repo; Contents and Pull requests read/write; the account a collaborator with write access) | recommended, see below   |
 
 With `FACTORY_PAT`, factory PRs run their workflows without an approval
 click, commits carry the machine account's name and reviews arrive as real
