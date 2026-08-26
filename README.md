@@ -36,7 +36,7 @@ repo:
 | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------- |
 | `factory.yml` → [`dispatch.yml`](.github/workflows/dispatch.yml)          | Turns a plan flipped to `ready` into a pull request, one matrix job per unit, routed by the plan's `model:` and `effort:` frontmatter                                    | when a push flips a plan to `ready`, on any branch |
 | `factory-review.yml` → [`review.yml`](.github/workflows/review.yml)       | Has Codex review every factory PR, with findings anchored to their lines and one-click `suggestion` blocks; a clean verdict plus green CI squash-merges the PR           | when a factory PR opens or updates                 |
-| `factory-commands.yml` → [`commands.yml`](.github/workflows/commands.yml) | `/factory implement [model] [effort]` turns an issue into a plan, an implementation and a PR that closes it; `/factory review` runs the review on any PR you point it at | when a user with write access comments             |
+| `factory-commands.yml` → [`commands.yml`](.github/workflows/commands.yml) | `/factory implement [model] [effort]` turns an issue into a plan, an implementation and a PR that closes it; `/factory review` runs the review on any PR you point it at; `/factory revise [model] [effort]` picks up a PR's review comments and pushes the fixes to its branch | when a user with write access comments             |
 
 Every run also comes with the following, and none of it needs configuring.
 
@@ -123,6 +123,7 @@ board flow      flip a plan to ready on the default branch, push
 branch flow     push a branch carrying a plan flipped to ready
 from an issue   comment:  /factory implement       (or: /factory implement opus high)
 any PR          comment:  /factory review          (the verdict posts; nothing merges)
+any PR          comment:  /factory revise          (the review comments become commits on its branch)
 ```
 
 While a run is going, the board tells the story:

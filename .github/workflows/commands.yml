@@ -6,6 +6,8 @@
 #   /factory implement [model] [effort] on an issue: treat the issue as the
 #                                       work order — a plan file, an
 #                                       implementation, a PR that closes it
+#   /factory revise [model] [effort]    on a PR: pick up the review comments,
+#                                       address them on the PR's branch, push
 #
 # Only comments from users with write access count: a comment is a spend
 # button, exactly like the ready flip on the board.
@@ -62,7 +64,7 @@ jobs:
         run: |
           set -- $BODY
           cmd="${2:-}"
-          case "$cmd" in review|implement) ;; *) echo "::notice::Unknown factory command '$cmd' — ignoring."; cmd="" ;; esac
+          case "$cmd" in review|implement|revise) ;; *) echo "::notice::Unknown factory command '$cmd' — ignoring."; cmd="" ;; esac
           model=""; effort=""
           case "${3:-}" in haiku|sonnet|opus) model="$3" ;; esac
           case "${4:-}" in low|medium|high|xhigh|max) effort="$4" ;; esac
@@ -70,6 +72,11 @@ jobs:
           echo "model=$model" >> "$GITHUB_OUTPUT"
           echo "effort=$effort" >> "$GITHUB_OUTPUT"
           gh api -X POST "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" -f content=eyes || true
+          if [ -n "$cmd" ]; then
+            run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            gh api -X POST "repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
+              -f body="On it: \`$cmd\`${model:+ on $model}${effort:+ at $effort effort} is running — [watch it here]($run_url). I'll report back on this thread when it finishes." || true
+          fi
 
   review:
     name: Review this PR
@@ -153,3 +160,110 @@ jobs:
           name: transcript-issue-${{ github.event.issue.number }}
           path: ${{ runner.temp }}/transcript.jsonl
           retention-days: 14
+
+  revise:
+    name: "Revise PR #${{ github.event.issue.number }}"
+    needs: route
+    if: needs.route.outputs.cmd == 'revise' && github.event.issue.pull_request
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.FACTORY_PAT || github.token }}
+
+      - uses: actions/checkout@v4
+        with:
+          repository: RatulMaharaj/factory
+          path: .factory
+
+      - name: Set origin/HEAD for the push guard
+        run: git remote set-head origin --auto
+
+      - name: Check out the PR branch
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN || github.token }}
+        run: gh pr checkout ${{ github.event.issue.number }}
+
+      - name: Provision the toolchain
+        if: inputs.setup != ''
+        run: ${{ inputs.setup }}
+
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: Revise the PR
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          GH_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN || github.token }}
+          PROMPT: |
+            You are a headless dispatched run: nobody is watching and nothing
+            can answer a question, so never ask one. You are on the branch of
+            pull request #${{ github.event.issue.number }}, checked out at
+            its tip. Your unit of work is the feedback on that PR. Read all
+            of it:
+            gh pr view ${{ github.event.issue.number }} --comments, and the
+            inline code comments via
+            gh api "repos/${{ github.repository }}/pulls/${{ github.event.issue.number }}/comments"
+            (paginate if needed). Address every actionable piece of feedback
+            with commits on this branch; where comments conflict, the most
+            recent wins. A comment that asks a question rather than a change
+            gets an answer in your summary, not a code change. If the changes
+            diverge from the PR's plan file, update the plan file in this
+            branch too. Verify with the smallest relevant check the
+            repository offers before pushing. Then push the branch — the ONLY
+            way you may push is:
+            .factory/scripts/git-push.sh origin <branch> — plain git push
+            will be denied. Never push to the default branch, never merge,
+            never close the PR. Finally post one summary comment with
+            gh pr comment ${{ github.event.issue.number }} listing what you
+            changed per comment and what you deliberately did not (and why).
+            The .factory directory is the factory's own tooling: never add,
+            commit, or modify anything under it.
+        run: |
+          git config user.name "factory"
+          git config user.email "factory@users.noreply.github.com"
+          base_tools="Glob,Grep,LS,Read,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git branch:*),Bash(git add:*),Bash(git commit:*),Bash(git rm:*),Bash(git worktree:*),Bash(git fetch:*),Bash(git checkout:*),Bash(.factory/scripts/git-push.sh:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh api repos/*)"
+          extra="${{ inputs.verify_tools }}"
+          claude -p "$PROMPT" \
+            --model "${{ needs.route.outputs.model || inputs.default_model }}" \
+            --effort "${{ needs.route.outputs.effort || inputs.default_effort }}" \
+            --output-format stream-json --verbose \
+            --max-turns "${{ inputs.max_turns }}" \
+            --permission-mode acceptEdits \
+            --allowedTools "${base_tools}${extra:+,$extra}" \
+            --disallowedTools "WebSearch,WebFetch" \
+            | tee "$RUNNER_TEMP/transcript.jsonl"
+
+      - name: Keep the transcript
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: transcript-revise-${{ github.event.issue.number }}
+          path: ${{ runner.temp }}/transcript.jsonl
+          retention-days: 14
+
+  # Close the loop on the ack: whatever the command did, say how it went on
+  # the same thread. The implement and revise agents post their own detailed
+  # summaries when they succeed; this one exists so a failure or cancelled
+  # run is never silent.
+  report:
+    name: Report back
+    needs: [route, review, implement, revise]
+    if: always() && needs.route.outputs.cmd != ''
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          CMD: ${{ needs.route.outputs.cmd }}
+          RESULTS: "review=${{ needs.review.result }} implement=${{ needs.implement.result }} revise=${{ needs.revise.result }}"
+        run: |
+          result="$(echo "$RESULTS" | tr ' ' '\n' | grep "^$CMD=" | cut -d= -f2)"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          case "$result" in
+            success)  body="\`$CMD\` finished — see the comments above for what it did, or [the run log]($run_url) for the blow-by-blow." ;;
+            failure)  body="\`$CMD\` **failed** — nothing was posted or pushed on its behalf. [The run log]($run_url) has the story; the transcript artifact on the run has the agent's side of it." ;;
+            *)        body="\`$CMD\` did not run ($result) — usually the command doesn't apply here (implement wants an issue, review and revise want a PR). [Run]($run_url)." ;;
+          esac
+          gh api -X POST "repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" -f body="$body"

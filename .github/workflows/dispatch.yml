@@ -96,6 +96,12 @@ jobs:
       - name: Set origin/HEAD for the push guard
         run: git remote set-head origin --auto
 
+      # checkout pins the SHA that triggered the run; on a rerun the branch
+      # may have moved on since, and a stale base turns the busy claim into a
+      # non-fast-forward. Build from the branch's current tip instead.
+      - name: Advance to the branch tip
+        run: git checkout -B "$GITHUB_REF_NAME" "origin/$GITHUB_REF_NAME"
+
       - name: Provision the toolchain
         if: inputs.setup != ''
         run: ${{ inputs.setup }}
