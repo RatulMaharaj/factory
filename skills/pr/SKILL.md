@@ -72,6 +72,14 @@ Two modes, decided by where the unit's `ready` flip lives:
 
 ## Finish into a PR
 
+- **Follow the repository's release and documentation conventions.** If the
+  repo uses changesets (a `.changeset/` directory), write one for this
+  change: pick the bump the change deserves and describe it the way the
+  existing changesets do — it is release notes written now, not
+  reconstructed later. If the repo keeps docs the change makes stale (a
+  README that describes the feature area, a `docs/` folder, a settings
+  reference), update them in the same PR. A merged PR that skips either
+  leaves work for a human that the run was supposed to finish.
 - **Verify** with the smallest relevant check the repository offers — its
   test command, its lint, its build; whatever CI would run first. If the
   repository has no checks at all, verify by exercising the change directly

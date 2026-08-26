@@ -211,7 +211,10 @@ jobs:
             recent wins. A comment that asks a question rather than a change
             gets an answer in your summary, not a code change. If the changes
             diverge from the PR's plan file, update the plan file in this
-            branch too. Verify with the smallest relevant check the
+            branch too — and keep the repository's conventions true to what
+            you changed: if the repo uses changesets, update or add one for
+            this PR; if docs describe what you touched, fix them in the same
+            commits. Verify with the smallest relevant check the
             repository offers before pushing. Then push the branch — the ONLY
             way you may push is:
             .factory/scripts/git-push.sh origin <branch> — plain git push
