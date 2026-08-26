@@ -72,6 +72,11 @@ jobs:
           echo "model=$model" >> "$GITHUB_OUTPUT"
           echo "effort=$effort" >> "$GITHUB_OUTPUT"
           gh api -X POST "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" -f content=eyes || true
+          if [ -n "$cmd" ]; then
+            run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            gh api -X POST "repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
+              -f body="On it: \`$cmd\`${model:+ on $model}${effort:+ at $effort effort} is running — [watch it here]($run_url). I'll report back on this thread when it finishes." || true
+          fi
 
   review:
     name: Review this PR
@@ -238,3 +243,27 @@ jobs:
           name: transcript-revise-${{ github.event.issue.number }}
           path: ${{ runner.temp }}/transcript.jsonl
           retention-days: 14
+
+  # Close the loop on the ack: whatever the command did, say how it went on
+  # the same thread. The implement and revise agents post their own detailed
+  # summaries when they succeed; this one exists so a failure or cancelled
+  # run is never silent.
+  report:
+    name: Report back
+    needs: [route, review, implement, revise]
+    if: always() && needs.route.outputs.cmd != ''
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          CMD: ${{ needs.route.outputs.cmd }}
+          RESULTS: "review=${{ needs.review.result }} implement=${{ needs.implement.result }} revise=${{ needs.revise.result }}"
+        run: |
+          result="$(echo "$RESULTS" | tr ' ' '\n' | grep "^$CMD=" | cut -d= -f2)"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          case "$result" in
+            success)  body="\`$CMD\` finished — see the comments above for what it did, or [the run log]($run_url) for the blow-by-blow." ;;
+            failure)  body="\`$CMD\` **failed** — nothing was posted or pushed on its behalf. [The run log]($run_url) has the story; the transcript artifact on the run has the agent's side of it." ;;
+            *)        body="\`$CMD\` did not run ($result) — usually the command doesn't apply here (implement wants an issue, review and revise want a PR). [Run]($run_url)." ;;
+          esac
+          gh api -X POST "repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" -f body="$body"
