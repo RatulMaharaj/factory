@@ -83,6 +83,25 @@ jobs:
           mkdir -p ~/.codex
           printf '%s' "$CODEX_AUTH_JSON" > ~/.codex/auth.json
 
+      # A re-review that cannot see the earlier rounds re-samples the same diff
+      # and surfaces a fresh batch of observations every time — the loop never
+      # converges. Hand the reviewer the PR's whole review history so a
+      # second round can only add something genuinely new.
+      - name: Collect prior review history
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.pr.outputs.pr }}
+        run: |
+          {
+            gh api --paginate "repos/${{ github.repository }}/pulls/$PR/comments" \
+              --jq '.[] | "- [inline, \(.user.login)] \(.path):\(.line // .original_line): \(.body)"'
+            gh api --paginate "repos/${{ github.repository }}/pulls/$PR/reviews" \
+              --jq '.[] | select(.body != "") | "- [review, \(.user.login)] \(.body)"'
+            gh api --paginate "repos/${{ github.repository }}/issues/$PR/comments" \
+              --jq '.[] | "- [comment, \(.user.login)] \(.body)"'
+          } > "$RUNNER_TEMP/history.md" || true
+          wc -c "$RUNNER_TEMP/history.md"
+
       - name: Review
         env:
           BASE: ${{ steps.pr.outputs.base }}
@@ -96,7 +115,13 @@ jobs:
           Review the diff between origin/$BASE and origin/$HEAD (git diff origin/$BASE...origin/$HEAD) for CORRECTNESS BUGS ONLY: \
           logic errors, broken edge cases, regressions, unsafe operations, contract violations with the surrounding code. \
           Read enough of the surrounding files to judge in context. Do not report style, naming, or taste. \
+          The bar is merge-blocking: for each finding ask whether you would block this merge over it; if not, leave it out. \
           Only include findings you are confident are real; if you are unsure, leave it out. \
+          $RUNNER_TEMP/history.md holds every comment already made on this PR, by reviewers and by the author. \
+          Read it first. Do not re-raise anything in it, even reworded or at a new line: a finding already made and \
+          answered or deliberately not taken is settled, and repeating it blocks the loop from ever converging. \
+          Report only issues that are new — introduced by commits the history does not discuss, or genuinely never raised. \
+          If the history covers everything you would have said, that IS a clean review; an empty findings list is a good outcome, not a failure to do the job. \
           Ignore everything under .factory/ — it is tooling, not part of the change. \
           Your final message must be PURE JSON, no fences, no prose around it: \
           {\"summary\": \"one-paragraph overall assessment\", \"findings\": [{\"path\": \"repo/relative/file\", \"line\": 123, \"body\": \"what breaks, with the concrete failing scenario\", \"suggestion\": \"exact replacement for that one line, only when a one-line fix is certain\"}]}. \
