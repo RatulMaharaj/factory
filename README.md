@@ -27,6 +27,42 @@ We built this for and alongside
 `plans/` folder as a board. The factory only needs the folder and its
 frontmatter conventions, so you can use it without the app.
 
+## Quick start: let an agent install it
+
+The fastest way in is to hand the install to the coding agent you already
+use. Open Claude Code, Codex or Muse in the repo you want the factory to
+work on and paste this:
+
+```text
+Set up RatulMaharaj/factory in this repo. Read
+https://github.com/RatulMaharaj/factory/blob/main/README.md and the three
+templates under https://github.com/RatulMaharaj/factory/tree/main/templates,
+then:
+
+1. Copy factory.yml, factory-review.yml and factory-commands.yml into
+   .github/workflows/, pinned to @v1. Fill in the `with:` inputs from this
+   repo's actual toolchain: the runner, the `setup` command that installs
+   dependencies, and `verify_tools` as the smallest real checks (tests,
+   typecheck, lint) an agent should be allowed to run.
+2. Create a plans/ folder if there isn't one, following
+   https://github.com/RatulMaharaj/factory/blob/main/skills/plans/SKILL.md,
+   with one example plan left in `draft`.
+3. Tell me which secrets I need to add for the agents I've chosen
+   (CLAUDE_CODE_OAUTH_TOKEN, OPENAI_API_KEY or CODEX_AUTH_JSON, MUSE_API_KEY,
+   FACTORY_PAT) and how to generate each one. Do not ask me to paste any
+   secret into this conversation.
+4. Remind me to enable "Allow GitHub Actions to create and approve pull
+   requests" under Settings → Actions → General.
+
+Open a PR with the changes and summarise what I still have to do by hand.
+```
+
+The agent can do everything except the parts that need your credentials or
+the repo's settings page. Expect it to hand back a PR plus a short checklist:
+the secrets to add, the checkbox to tick. The
+[install section](#install-three-files-three-secrets-one-checkbox) below
+covers the same steps by hand and explains what each secret is for.
+
 ## What you get
 
 Three reusable workflows. You call them from three thin files in your own
