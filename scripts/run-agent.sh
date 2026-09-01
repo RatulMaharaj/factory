@@ -58,6 +58,31 @@ codex_auth() {
   fi
 }
 
+codex_ensure_platform_package() {
+  # @openai/codex ships its binary in a per-platform optionalDependency
+  # (e.g. @openai/codex-linux-x64). npm silently skips an optional dep it
+  # cannot fetch — registry propagation lag right after a release, a flaky
+  # mirror — and the launcher then dies with "Missing optional dependency".
+  # Verify, and if the binary is absent install the platform package
+  # explicitly at the exact version of the launcher we just installed.
+  if codex --version >/dev/null 2>&1; then return 0; fi
+  local version arch pkg
+  version=$(npm ls -g @openai/codex --json 2>/dev/null | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).dependencies["@openai/codex"].version')
+  case "$(uname -m)" in
+    x86_64|amd64) arch=x64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) echo "::error::Unsupported architecture $(uname -m) for Codex."; exit 1 ;;
+  esac
+  case "$(uname -s)" in
+    Linux)  pkg="@openai/codex-linux-$arch" ;;
+    Darwin) pkg="@openai/codex-darwin-$arch" ;;
+    *) echo "::error::Unsupported OS $(uname -s) for Codex."; exit 1 ;;
+  esac
+  echo "::warning::$pkg was not installed alongside @openai/codex@$version; installing it explicitly."
+  npm install -g "$pkg@npm:@openai/codex@${version}-${pkg#@openai/codex-}"
+  codex --version >/dev/null || { echo "::error::Codex still cannot find its binary after installing $pkg."; exit 1; }
+}
+
 muse_auth() {
   require_env MUSE_API_KEY "Set the MUSE_API_KEY secret (a Meta Model API key) so Muse can sign in."
   # The docs have shipped both names; export both so either CLI build works.
@@ -80,7 +105,10 @@ case "$cmd" in
   install)
     case "$AGENT" in
       claude) npm install -g @anthropic-ai/claude-code ;;
-      codex)  npm install -g @openai/codex ;;
+      codex)
+        npm install -g @openai/codex@latest
+        codex_ensure_platform_package
+        ;;
       muse)
         curl -fsSL https://dev.meta.ai/install.sh | bash
         muse_path
