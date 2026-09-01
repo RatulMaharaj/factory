@@ -1,7 +1,8 @@
-# The factory's reviewer, reusable — a second vendor, on purpose. Claude
-# built the PR; Codex reviews it, so the review is independent of the model
-# that wrote the code and bills OpenAI (an API key, or the Codex
-# subscription as fallback) rather than drawing down the Claude one. Findings post as a Request-changes review with
+# The factory's reviewer, reusable — a second vendor, on purpose (though the
+# agent is yours to pick). By default Claude builds the PR and Codex reviews
+# it, so the review is independent of the model that wrote the code and the
+# two bills don't compete; set `agent` to claude, codex or muse to route the
+# review elsewhere. Findings post as a Request-changes review with
 # line-anchored comments and one-click suggestion blocks; a clean verdict
 # plus green CI squash-merges factory PRs. On-demand reviews (workflow_call
 # with a pr input, e.g. from /factory review) post their verdict and stop —
@@ -28,11 +29,61 @@ on:
         description: "Login whose PRs count as factory PRs (besides impl/** heads and the Actions bot)"
         type: string
         default: ""
-      model:
-        description: "Codex model the review runs on. Pinned so the verdict does not drift with the CLI's default."
+      agent:
+        description: "Which agent reviews: claude (Anthropic), codex (OpenAI) or muse (Meta)"
         type: string
-        default: gpt-5.6-luna
+        default: codex
+      model:
+        description: "Model the review runs on, pinned so the verdict does not drift with the CLI's default. Empty means the agent's pinned default (opus / gpt-5.6-luna / muse-spark-1.2)."
+        type: string
+        default: ""
+      effort:
+        description: "Reasoning effort for the review (low|medium|high|xhigh|max). Empty means the CLI's default."
+        type: string
+        default: ""
+      auto_merge:
+        description: "Squash-merge a factory PR when the review is clean and CI is green. Off, the verdict still posts and the merge is yours to click."
+        type: boolean
+        default: true
+      auto_revise:
+        description: "When the review lands FINDINGS on a factory PR, dispatch one automatic revise run on its branch. One round only: a PR that has already been auto-revised is left for humans or /factory revise."
+        type: boolean
+        default: false
+      revise_agent:
+        description: "Agent for the auto-revise run: claude, codex or muse"
+        type: string
+        default: claude
+      revise_model:
+        description: "Model for the auto-revise run. Empty means the agent's default."
+        type: string
+        default: ""
+      revise_effort:
+        description: "Effort for the auto-revise run"
+        type: string
+        default: medium
+      max_turns:
+        description: "Turn budget for the auto-revise run"
+        type: number
+        default: 250
+      runner:
+        description: "Runner for the auto-revise run — match the caller's CI so verify can run"
+        type: string
+        default: ubuntu-latest
+      setup:
+        description: "Shell to provision the toolchain before the auto-revise run"
+        type: string
+        default: ""
+      verify_tools:
+        description: "Extra allowlist entries for verify commands in the auto-revise run (claude agent only)"
+        type: string
+        default: ""
     secrets:
+      CLAUDE_CODE_OAUTH_TOKEN:
+        description: "From `claude setup-token` — needed when agent is claude"
+        required: false
+      MUSE_API_KEY:
+        description: "Meta Model API key — needed when agent is muse"
+        required: false
       OPENAI_API_KEY:
         description: >-
           An OpenAI platform API key. The preferred auth: a key does not
@@ -53,7 +104,7 @@ on:
 
 jobs:
   review:
-    name: Codex reviews the diff
+    name: Review the diff (${{ inputs.agent }})
     # Factory PRs review automatically; explicit calls (a pr input) were
     # asked for, so no filter applies to them.
     if: >-
@@ -96,23 +147,10 @@ jobs:
           echo "sha=$(jq -r .headRefOid <<<"$data")" >> "$GITHUB_OUTPUT"
           [ "$(jq -r .state <<<"$data")" = "OPEN" ] || { echo "::error::PR #$PR is not open."; exit 1; }
 
-      - name: Install Codex
-        run: npm install -g @openai/codex
-
-      - name: Restore Codex auth
+      - name: Install the reviewer
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
-        run: |
-          mkdir -p ~/.codex
-          if [ -n "$OPENAI_API_KEY" ]; then
-            printf '{"OPENAI_API_KEY": "%s"}' "$OPENAI_API_KEY" > ~/.codex/auth.json
-          elif [ -n "$CODEX_AUTH_JSON" ]; then
-            printf '%s' "$CODEX_AUTH_JSON" > ~/.codex/auth.json
-          else
-            echo "::error::Set OPENAI_API_KEY (preferred) or CODEX_AUTH_JSON so Codex can sign in."
-            exit 1
-          fi
+          AGENT: ${{ inputs.agent }}
+        run: .factory/scripts/run-agent.sh install
 
       # A re-review that cannot see the earlier rounds re-samples the same diff
       # and surfaces a fresh batch of observations every time — the loop never
@@ -135,14 +173,19 @@ jobs:
 
       - name: Review
         env:
+          AGENT: ${{ inputs.agent }}
+          MODEL: ${{ inputs.model }}
+          EFFORT: ${{ inputs.effort }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
           BASE: ${{ steps.pr.outputs.base }}
           HEAD: ${{ steps.pr.outputs.head }}
         run: |
-          # danger-full-access: Codex's own sandbox (bwrap) cannot start on
-          # a GitHub runner, and adds nothing there — the runner is an
-          # ephemeral VM discarded after the job.
-          codex exec --model "${{ inputs.model }}" --sandbox danger-full-access --output-last-message "$RUNNER_TEMP/review.json" \
-            "You are reviewing a pull request. \
+          # The shim runs the chosen agent sandbox-off where it has one —
+          # the runner is an ephemeral VM discarded after the job.
+          PROMPT="You are reviewing a pull request. \
           Review the diff between origin/$BASE and origin/$HEAD (git diff origin/$BASE...origin/$HEAD) for CORRECTNESS BUGS ONLY: \
           logic errors, broken edge cases, regressions, unsafe operations, contract violations with the surrounding code. \
           Read enough of the surrounding files to judge in context. Do not report style, naming, or taste. \
@@ -159,6 +202,8 @@ jobs:
           line MUST be a line that appears on the new side of the diff (added or context), because the finding is posted as an inline PR comment there. \
           suggestion is optional and must be a drop-in replacement for exactly that line, matching its indentation. \
           A clean review is {\"summary\": \"...\", \"findings\": []}."
+          export PROMPT
+          OUT="$RUNNER_TEMP/review.json" .factory/scripts/run-agent.sh review
 
       # Codex auth rides the ChatGPT subscription, and the subscription's
       # refresh token is single-use: running Codex consumes it and issues a
@@ -170,7 +215,7 @@ jobs:
       # old failure mode returns. `always()` because the rotation happens
       # when Codex *runs*, whether or not the review then succeeded.
       - name: Persist the rotated Codex auth
-        if: always()
+        if: always() && inputs.agent == 'codex'
         env:
           GH_TOKEN: ${{ secrets.FACTORY_PAT }}
           OLD_AUTH: ${{ secrets.CODEX_AUTH_JSON }}
@@ -202,7 +247,7 @@ jobs:
   merge:
     name: Merge when clean and green
     needs: review
-    if: needs.review.outputs.verdict == 'CLEAN' && github.event_name == 'pull_request'
+    if: needs.review.outputs.verdict == 'CLEAN' && github.event_name == 'pull_request' && inputs.auto_merge
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -230,3 +275,134 @@ jobs:
           done
           [ "$state" = "success" ] || { echo "::error::CI did not finish in time."; exit 1; }
           gh pr merge ${{ needs.review.outputs.pr }} --squash --delete-branch
+
+  # One automatic revision, at most. FINDINGS on a factory PR dispatches a
+  # revise run on its branch; the marker comment it leaves is the fuse — a
+  # later review round that finds it leaves the PR for humans (or an
+  # explicit /factory revise, which is unaffected by the fuse). The loop
+  # closes only when pushes retrigger review, i.e. when FACTORY_PAT is set:
+  # a GITHUB_TOKEN push does not restart workflows, so without the PAT the
+  # revised branch just waits for its next event.
+  auto-revise:
+    name: "Auto-revise PR #${{ needs.review.outputs.pr }}"
+    needs: review
+    if: >-
+      needs.review.outputs.verdict == 'FINDINGS' &&
+      github.event_name == 'pull_request' &&
+      inputs.auto_revise
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.FACTORY_PAT || github.token }}
+
+      - uses: actions/checkout@v4
+        with:
+          repository: RatulMaharaj/factory
+          path: .factory
+
+      # The fuse: has an auto-revision already run on this PR?
+      - name: First round only
+        id: fuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ needs.review.outputs.pr }}
+        run: |
+          prior=$(gh api --paginate "repos/${{ github.repository }}/issues/$PR/comments" \
+            --jq '[.[] | select(.body | contains("<!-- factory-auto-revise -->"))] | length')
+          if [ "$prior" -gt 0 ]; then
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            echo "An auto-revision already ran on this PR — leaving the new findings for a human or /factory revise."
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set origin/HEAD for the push guard
+        if: steps.fuse.outputs.go == 'true'
+        run: git remote set-head origin --auto
+
+      - name: Check out the PR branch
+        if: steps.fuse.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN || github.token }}
+        run: gh pr checkout ${{ needs.review.outputs.pr }}
+
+      - name: Provision the toolchain
+        if: steps.fuse.outputs.go == 'true' && inputs.setup != ''
+        run: ${{ inputs.setup }}
+
+      - name: Install the agent
+        if: steps.fuse.outputs.go == 'true'
+        env:
+          AGENT: ${{ inputs.revise_agent }}
+        run: .factory/scripts/run-agent.sh install
+
+      - name: Revise the PR
+        if: steps.fuse.outputs.go == 'true'
+        env:
+          AGENT: ${{ inputs.revise_agent }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
+          GH_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN || github.token }}
+          PROMPT: |
+            You are a headless dispatched run: nobody is watching and nothing
+            can answer a question, so never ask one. You are on the branch of
+            pull request #${{ needs.review.outputs.pr }}, checked out at its
+            tip. Your unit of work is the review feedback just posted on that
+            PR. Read all of it:
+            gh pr view ${{ needs.review.outputs.pr }} --comments, and the
+            inline code comments via
+            gh api "repos/${{ github.repository }}/pulls/${{ needs.review.outputs.pr }}/comments"
+            (paginate if needed). Address every actionable piece of feedback
+            with commits on this branch; where comments conflict, the most
+            recent wins. A comment that asks a question rather than a change
+            gets an answer in your summary, not a code change. If the changes
+            diverge from the PR's plan file, update the plan file in this
+            branch too — and keep the repository's conventions true to what
+            you changed: if the repo uses changesets, update or add one for
+            this PR; if docs describe what you touched, fix them in the same
+            commits. Verify with the smallest relevant check the repository
+            offers before pushing. Then push the branch — the ONLY way you
+            may push is:
+            .factory/scripts/git-push.sh origin <branch> — plain git push
+            will be denied. Never push to the default branch, never merge,
+            never close the PR. Finally post one summary comment with
+            gh pr comment ${{ needs.review.outputs.pr }} listing what you
+            changed per finding and what you deliberately did not (and why).
+            The .factory directory is the factory's own tooling: never add,
+            commit, or modify anything under it.
+        run: |
+          git config user.name "factory"
+          git config user.email "factory@users.noreply.github.com"
+          base_tools="Glob,Grep,LS,Read,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git branch:*),Bash(git add:*),Bash(git commit:*),Bash(git rm:*),Bash(git worktree:*),Bash(git fetch:*),Bash(git checkout:*),Bash(.factory/scripts/git-push.sh:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh api repos/*)"
+          extra="${{ inputs.verify_tools }}"
+          MODEL="${{ inputs.revise_model }}" \
+          EFFORT="${{ inputs.revise_effort }}" \
+          MAX_TURNS="${{ inputs.max_turns }}" \
+          ALLOWED_TOOLS="${base_tools}${extra:+,$extra}" \
+          TRANSCRIPT="$RUNNER_TEMP/transcript.jsonl" \
+          FACTORY_DIR=.factory \
+            .factory/scripts/run-agent.sh run
+
+      # Blow the fuse whether or not the revise run succeeded: a failed
+      # attempt retried on every synchronize would loop the same failure.
+      - name: Mark the auto-revision spent
+        if: always() && steps.fuse.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh api -X POST "repos/${{ github.repository }}/issues/${{ needs.review.outputs.pr }}/comments" \
+            -f body="Auto-revision dispatched for the review findings ([run]($run_url)). This was the one automatic round — further findings need a human or \`/factory revise\`. <!-- factory-auto-revise -->" || true
+
+      - name: Keep the transcript
+        if: always() && steps.fuse.outputs.go == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: transcript-auto-revise-${{ needs.review.outputs.pr }}
+          path: ${{ runner.temp }}/transcript.jsonl
+          retention-days: 14
