@@ -1,7 +1,7 @@
 # The factory's reviewer, reusable — a second vendor, on purpose. Claude
 # built the PR; Codex reviews it, so the review is independent of the model
-# that wrote the code and bills the Codex subscription rather than drawing
-# down the Claude one. Findings post as a Request-changes review with
+# that wrote the code and bills OpenAI (an API key, or the Codex
+# subscription as fallback) rather than drawing down the Claude one. Findings post as a Request-changes review with
 # line-anchored comments and one-click suggestion blocks; a clean verdict
 # plus green CI squash-merges factory PRs. On-demand reviews (workflow_call
 # with a pr input, e.g. from /factory review) post their verdict and stop —
@@ -28,10 +28,28 @@ on:
         description: "Login whose PRs count as factory PRs (besides impl/** heads and the Actions bot)"
         type: string
         default: ""
+      model:
+        description: "Codex model the review runs on. Pinned so the verdict does not drift with the CLI's default."
+        type: string
+        default: gpt-5.6-luna
     secrets:
+      OPENAI_API_KEY:
+        description: >-
+          An OpenAI platform API key. The preferred auth: a key does not
+          rotate, so nothing goes stale between runs.
+        required: false
       CODEX_AUTH_JSON:
-        description: "Contents of ~/.codex/auth.json after `codex login`"
-        required: true
+        description: >-
+          Contents of ~/.codex/auth.json after `codex login`. Fallback when
+          no OPENAI_API_KEY is set; rotates on every run, so it needs the
+          write-back below (and FACTORY_PAT) to survive.
+        required: false
+      FACTORY_PAT:
+        description: >-
+          Optional. With the Secrets read/write permission added, the rotated
+          Codex auth is written back to the caller's CODEX_AUTH_JSON secret
+          after each review — see the persist step for why.
+        required: false
 
 jobs:
   review:
@@ -46,6 +64,11 @@ jobs:
       github.event.pull_request.user.login == inputs.machine_account
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # One review at a time per repository. Codex rotates its refresh token on
+    # every run, and the secret can only hold one line of succession — two
+    # reviews refreshing in parallel would each burn the other's token.
+    concurrency:
+      group: codex-auth-${{ github.repository }}
     outputs:
       verdict: ${{ steps.verdict.outputs.verdict }}
       pr: ${{ steps.pr.outputs.pr }}
@@ -78,10 +101,18 @@ jobs:
 
       - name: Restore Codex auth
         env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
         run: |
           mkdir -p ~/.codex
-          printf '%s' "$CODEX_AUTH_JSON" > ~/.codex/auth.json
+          if [ -n "$OPENAI_API_KEY" ]; then
+            printf '{"OPENAI_API_KEY": "%s"}' "$OPENAI_API_KEY" > ~/.codex/auth.json
+          elif [ -n "$CODEX_AUTH_JSON" ]; then
+            printf '%s' "$CODEX_AUTH_JSON" > ~/.codex/auth.json
+          else
+            echo "::error::Set OPENAI_API_KEY (preferred) or CODEX_AUTH_JSON so Codex can sign in."
+            exit 1
+          fi
 
       # A re-review that cannot see the earlier rounds re-samples the same diff
       # and surfaces a fresh batch of observations every time — the loop never
@@ -110,7 +141,7 @@ jobs:
           # danger-full-access: Codex's own sandbox (bwrap) cannot start on
           # a GitHub runner, and adds nothing there — the runner is an
           # ephemeral VM discarded after the job.
-          codex exec --sandbox danger-full-access --output-last-message "$RUNNER_TEMP/review.json" \
+          codex exec --model "${{ inputs.model }}" --sandbox danger-full-access --output-last-message "$RUNNER_TEMP/review.json" \
             "You are reviewing a pull request. \
           Review the diff between origin/$BASE and origin/$HEAD (git diff origin/$BASE...origin/$HEAD) for CORRECTNESS BUGS ONLY: \
           logic errors, broken edge cases, regressions, unsafe operations, contract violations with the surrounding code. \
@@ -128,6 +159,35 @@ jobs:
           line MUST be a line that appears on the new side of the diff (added or context), because the finding is posted as an inline PR comment there. \
           suggestion is optional and must be a drop-in replacement for exactly that line, matching its indentation. \
           A clean review is {\"summary\": \"...\", \"findings\": []}."
+
+      # Codex auth rides the ChatGPT subscription, and the subscription's
+      # refresh token is single-use: running Codex consumes it and issues a
+      # new one, which until now died with the runner while the secret kept
+      # the burnt one — the next run then failed with "refresh token was
+      # already used". Writing the rotated file back keeps the secret at the
+      # head of the chain. Needs FACTORY_PAT to carry the Secrets read/write
+      # permission; without the PAT the step says so and skips, and the
+      # old failure mode returns. `always()` because the rotation happens
+      # when Codex *runs*, whether or not the review then succeeded.
+      - name: Persist the rotated Codex auth
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.FACTORY_PAT }}
+          OLD_AUTH: ${{ secrets.CODEX_AUTH_JSON }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # An API key does not rotate; there is nothing to persist.
+          [ -n "$OPENAI_API_KEY" ] && exit 0
+          [ -f ~/.codex/auth.json ] || exit 0
+          new=$(cat ~/.codex/auth.json)
+          [ "$new" = "$OLD_AUTH" ] && { echo "auth unchanged"; exit 0; }
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::Codex rotated its auth but FACTORY_PAT is not set — the stored CODEX_AUTH_JSON is now stale and the next review will fail to sign in."
+            exit 0
+          fi
+          gh secret set CODEX_AUTH_JSON --repo "${{ github.repository }}" --body "$new" &&
+            echo "auth rotated — secret updated" ||
+            echo "::warning::Could not write CODEX_AUTH_JSON back (does FACTORY_PAT have the Secrets read/write permission?). The stored auth is now stale."
 
       - name: Post the review
         id: verdict
