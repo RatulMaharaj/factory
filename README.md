@@ -100,14 +100,29 @@ jobs:
 | Secret                    | Where it comes from                                                                                                                   | Needed for               |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
 | `CLAUDE_CODE_OAUTH_TOKEN` | run `claude setup-token` locally                                                                                                      | every implementation run |
-| `CODEX_AUTH_JSON`         | run `codex login` locally, then save the contents of `~/.codex/auth.json`                                                             | review and auto-merge    |
-| `FACTORY_PAT`             | a machine account's fine-grained PAT (this repo; Contents and Pull requests read/write; the account a collaborator with write access) | recommended, see below   |
+| `OPENAI_API_KEY`          | an OpenAI platform API key (platform.openai.com)                                                                                      | review and auto-merge    |
+| `CODEX_AUTH_JSON`         | run `codex login` locally, then save the contents of `~/.codex/auth.json` - fallback when no `OPENAI_API_KEY` is set                  | review, if no API key    |
+| `FACTORY_PAT`             | a machine account's fine-grained PAT (this repo; Contents, Pull requests and Secrets read/write; the account a collaborator with write access) | recommended, see below   |
 
 With `FACTORY_PAT`, factory PRs run their workflows without an approval
 click, commits carry the machine account's name and reviews arrive as real
 Request-changes or Approve states. Without it everything still works: PRs
 are authored by the Actions bot, each one needs a single "Approve and run"
 click, and reviews post as plain comments.
+
+Reviews run on the model the `model` input names (default `gpt-5.6-luna`),
+authenticated by `OPENAI_API_KEY` when it is set - the steady state, since a
+key does not rotate. `CODEX_AUTH_JSON` is the fallback for running reviews
+on a ChatGPT subscription instead.
+
+`CODEX_AUTH_JSON` is a rotating credential: running Codex consumes the
+refresh token inside it and issues a new one. The review workflow writes the
+rotated file back to the secret after each run, which is what the PAT's
+Secrets permission is for - without it the stored auth goes stale on the
+first review and every later one fails asking you to sign in again. Two
+things keep the chain intact: give CI a login of its own (a session you also
+use locally will burn CI's token whenever your machine refreshes first), and
+re-seed the secret from a fresh `codex login` if the chain ever breaks.
 
 **3. One repo setting:** Settings → Actions → General → allow GitHub
 Actions to **create and approve pull requests**.
