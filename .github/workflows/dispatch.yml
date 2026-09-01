@@ -129,6 +129,7 @@ jobs:
             .factory/scripts/git-push.sh origin <branch> — plain git push
             will be denied.
         run: |
+          set -o pipefail
           git config user.name "factory"
           git config user.email "factory@users.noreply.github.com"
           base_tools="Glob,Grep,LS,Read,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git branch:*),Bash(git add:*),Bash(git commit:*),Bash(git rm:*),Bash(git worktree:*),Bash(git fetch:*),Bash(git checkout:*),Bash(.factory/scripts/git-push.sh:*),Bash(gh pr create:*),Bash(gh pr list:*)"
@@ -141,7 +142,8 @@ jobs:
             --permission-mode acceptEdits \
             --allowedTools "${base_tools}${extra:+,$extra}" \
             --disallowedTools "WebSearch,WebFetch" \
-            | tee "$RUNNER_TEMP/transcript.jsonl"
+            | tee "$RUNNER_TEMP/transcript.jsonl" \
+            | node .factory/scripts/render-stream.mjs
 
       - name: Keep the transcript
         if: always()
