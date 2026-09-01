@@ -1,4 +1,6 @@
 # /factory review on a PR, /factory implement [model] [effort] on an issue.
+# Secrets are passed explicitly (repo- or org-level), not inherited
+# wholesale; pass only what your chosen agents need.
 name: Factory Commands
 on:
   issue_comment:
@@ -10,7 +12,15 @@ permissions:
 jobs:
   commands:
     uses: RatulMaharaj/factory/.github/workflows/commands.yml@v1
-    secrets: inherit
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }} # codex subscription fallback
+      # MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}       # if either agent is muse
+      FACTORY_PAT: ${{ secrets.FACTORY_PAT }}
     with:
       ci_workflow: CI
-      # runner / setup / verify_tools: same as your Factory workflow
+      agent: claude # implements and revises
+      review_agent: codex # reviews
+      # review_model: gpt-5.6-luna
+      # runner / setup / verify_tools / default_model: same as your Factory workflow

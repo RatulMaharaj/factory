@@ -53,13 +53,20 @@ const frontmatter = (text) => {
   return fm;
 };
 
-const MODELS = ["haiku", "sonnet", "opus"];
+// `model:` frontmatter hints are Claude model names; when another agent
+// (codex, muse) implements, the hints don't apply and every unit runs on
+// DEFAULT_MODEL (empty means "the agent's own default", resolved by
+// run-agent.sh at run time).
+const AGENT = process.env.AGENT || "claude";
+const MODELS = AGENT === "claude" ? ["haiku", "sonnet", "opus"] : [];
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
-const DEFAULT_MODEL = process.env.DEFAULT_MODEL || "opus";
+const DEFAULT_MODEL = process.env.DEFAULT_MODEL || (AGENT === "claude" ? "opus" : "");
 const DEFAULT_EFFORT = process.env.DEFAULT_EFFORT || "medium";
 const highest = (rank, values, fallback) => {
   const bad = values.filter((v) => v && !rank.includes(v));
-  for (const v of bad) console.error(`warning: ignoring invalid frontmatter hint '${v}' (valid: ${rank.join(", ")})`);
+  for (const v of bad) console.error(rank.length
+    ? `warning: ignoring invalid frontmatter hint '${v}' (valid: ${rank.join(", ")})`
+    : `warning: ignoring frontmatter hint '${v}' — hints only route the claude agent (agent is '${AGENT}')`);
   const ok = values.filter((v) => rank.includes(v));
   return ok.length ? rank[Math.max(...ok.map((v) => rank.indexOf(v)))] : fallback;
 };

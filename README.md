@@ -16,8 +16,8 @@ at one end and reading the diff at the other.
 flowchart LR
     A["📝 you write a plan<br/><i>status: ready</i>"] --> B{{"gate<br/><i>did a status become ready?</i>"}}
     B -- "no flip" --> Z(["skips"])
-    B -- "one job per unit" --> C["Claude implements<br/><i>branch, verify, PR</i>"]
-    C --> D["Codex reviews<br/><i>line-anchored findings</i>"]
+    B -- "one job per unit" --> C["an agent implements<br/><i>Claude by default — branch, verify, PR</i>"]
+    C --> D["another agent reviews<br/><i>Codex by default — line-anchored findings</i>"]
     D -- "findings" --> E(["PR held open for you,<br/>with suggested changes"])
     D -- "clean + CI green" --> F(["auto-merged"])
 ```
@@ -35,7 +35,7 @@ repo:
 | You add                                                                   | What it does                                                                                                                                                             | When it runs                                       |
 | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------- |
 | `factory.yml` → [`dispatch.yml`](.github/workflows/dispatch.yml)          | Turns a plan flipped to `ready` into a pull request, one matrix job per unit, routed by the plan's `model:` and `effort:` frontmatter                                    | when a push flips a plan to `ready`, on any branch |
-| `factory-review.yml` → [`review.yml`](.github/workflows/review.yml)       | Has Codex review every factory PR, with findings anchored to their lines and one-click `suggestion` blocks; a clean verdict plus green CI squash-merges the PR           | when a factory PR opens or updates                 |
+| `factory-review.yml` → [`review.yml`](.github/workflows/review.yml)       | Has an agent (Codex by default) review every factory PR, with findings anchored to their lines and one-click `suggestion` blocks; a clean verdict plus green CI squash-merges the PR (`auto_merge: false` keeps the click yours), and `auto_revise: true` turns the first round of findings into an automatic revise run on the PR's branch | when a factory PR opens or updates                 |
 | `factory-commands.yml` → [`commands.yml`](.github/workflows/commands.yml) | `/factory implement [model] [effort]` turns an issue into a plan, an implementation and a PR that closes it; `/factory review` runs the review on any PR you point it at; `/factory revise [model] [effort]` picks up a PR's review comments and pushes the fixes to its branch | when a user with write access comments             |
 
 Every run also comes with the following, and none of it needs configuring.
@@ -50,16 +50,23 @@ Every run also comes with the following, and none of it needs configuring.
   branch and one PR. A plan flipped on the default branch builds in a
   worktree on an `impl/` branch instead, because the base can't be
   committed to.
-- **Routing lives in the frontmatter.** `model: haiku|sonnet|opus` and
+- **Routing lives in the frontmatter.** `model: haiku|sonnet|opus` (claude
+  agent only — other agents run every plan on your `default_model`) and
   `effort: low|medium|high|xhigh|max` route each plan's run. A feature
   folder (`plans/feature-name/`) runs as one unit at the highest values any
   member asks for. A value the dispatcher doesn't recognise gets a warning
   and falls back to your default, so a typo won't fail the run.
-- **The builder and the reviewer are different vendors.** Claude Code
-  implements, billed to your Claude subscription through an OAuth token.
-  Codex reviews, billed to your Codex subscription. This keeps the review
-  independent of the model that wrote the code, and it means the two bills
-  don't compete for the same usage limits.
+- **Every workflow picks its own agent — and its own model.** The
+  implement/revise side and the review side each take an `agent` input:
+  `claude` (Claude Code, Anthropic), `codex` (Codex CLI, OpenAI) or `muse`
+  (Muse Code, Meta) — any combination, e.g. Claude implements and Muse
+  reviews, or Codex implements and Claude reviews. Each side also takes a
+  model input (`default_model` for implement/revise, `model` for review);
+  left empty, it falls back to the agent's pinned default (`opus`,
+  `gpt-5.6-luna`, `muse-spark-1.2`). The defaults keep the original split —
+  Claude builds, Codex reviews — because a reviewer from a different vendor
+  is independent of the model that wrote the code, and the two bills don't
+  compete for the same usage limits.
 - **Every run is bounded and recorded.** A turn budget and a wall-clock
   timeout cap each run, the transcript streams turn by turn into the live
   Actions log, and the full transcript is kept as a job artifact for two
@@ -87,21 +94,30 @@ repo's `.github/workflows/` and adapt the `with:` inputs to your repo:
 jobs:
   factory:
     uses: RatulMaharaj/factory/.github/workflows/dispatch.yml@v1
-    secrets: inherit
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      FACTORY_PAT: ${{ secrets.FACTORY_PAT }}
     with:
       runner: ubuntu-latest              # match your CI
       setup: pnpm install                # provision the toolchain
       verify_tools: "Bash(pnpm test:*)"  # your smallest real checks
+      agent: claude                      # claude | codex | muse
       default_model: opus                # for plans with no model: hint
 ```
 
-**2. Add the secrets:**
+The templates pass secrets explicitly rather than `secrets: inherit`: only
+the secrets you name — set on the repo, or inherited from your org — reach
+the reusable workflow, and a workflow never sees a credential its agent
+doesn't use.
+
+**2. Add the secrets your chosen agents need:**
 
 | Secret                    | Where it comes from                                                                                                                   | Needed for               |
 | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ |
-| `CLAUDE_CODE_OAUTH_TOKEN` | run `claude setup-token` locally                                                                                                      | every implementation run |
-| `OPENAI_API_KEY`          | an OpenAI platform API key (platform.openai.com)                                                                                      | review and auto-merge    |
-| `CODEX_AUTH_JSON`         | run `codex login` locally, then save the contents of `~/.codex/auth.json` - fallback when no `OPENAI_API_KEY` is set                  | review, if no API key    |
+| `CLAUDE_CODE_OAUTH_TOKEN` | run `claude setup-token` locally                                                                                                      | any `claude` agent       |
+| `OPENAI_API_KEY`          | an OpenAI platform API key (platform.openai.com)                                                                                      | any `codex` agent (default reviewer) |
+| `CODEX_AUTH_JSON`         | run `codex login` locally, then save the contents of `~/.codex/auth.json` - fallback when no `OPENAI_API_KEY` is set                  | `codex`, if no API key   |
+| `MUSE_API_KEY`            | a Meta Model API key (Model API dashboard → API keys)                                                                                 | any `muse` agent         |
 | `FACTORY_PAT`             | a machine account's fine-grained PAT (this repo; Contents, Pull requests and Secrets read/write; the account a collaborator with write access) | recommended, see below   |
 
 With `FACTORY_PAT`, factory PRs run their workflows without an approval
@@ -110,10 +126,18 @@ Request-changes or Approve states. Without it everything still works: PRs
 are authored by the Actions bot, each one needs a single "Approve and run"
 click, and reviews post as plain comments.
 
-Reviews run on the model the `model` input names (default `gpt-5.6-luna`),
-authenticated by `OPENAI_API_KEY` when it is set - the steady state, since a
-key does not rotate. `CODEX_AUTH_JSON` is the fallback for running reviews
-on a ChatGPT subscription instead.
+Reviews run on the agent the `agent` input names (default `codex`) and the
+model the `model` input names (empty = the agent's pinned default). With the
+default codex reviewer, `OPENAI_API_KEY` is the steady-state auth, since a
+key does not rotate; `CODEX_AUTH_JSON` is the fallback for running reviews
+on a ChatGPT subscription instead. A `claude` reviewer needs
+`CLAUDE_CODE_OAUTH_TOKEN`, and a `muse` reviewer needs `MUSE_API_KEY` —
+neither rotates, so neither needs the write-back below.
+
+One guard-rail caveat when the implementer isn't Claude: only Claude Code
+enforces a per-tool allowlist, so with `codex` or `muse` implementing, the
+"push only via `git-push.sh`" rule is carried by the prompt and by the
+wrapper's own checks rather than by a hard tool policy.
 
 `CODEX_AUTH_JSON` is a rotating credential: running Codex consumes the
 refresh token inside it and issues a new one. The review workflow writes the
@@ -168,8 +192,18 @@ with whatever you're doing in a terminal.
 
 The merge gate is advisory. A wrong `CLEAN` verdict merges the PR, which
 means your oversight moves from clicking merge to reading what merged.
-If you want a human click back in the loop, leave out the
-`factory-review.yml` caller and merge the PRs yourself.
+If you want a human click back in the loop, set `auto_merge: false` on the
+review workflow (the verdict still posts) — or leave out the
+`factory-review.yml` caller entirely and merge the PRs yourself.
+
+`auto_revise: true` closes one more loop: a review that lands findings
+dispatches a single revise run on the PR's branch, so the round you used to
+start with `/factory revise` happens on its own. It is one round by design —
+the run leaves a marker comment on the PR, and any later review that sees
+the marker leaves new findings for a human or an explicit `/factory revise`.
+That first automatic round is extra spend triggered by a machine verdict,
+which is why it defaults to off. The revised push only retriggers the review
+when `FACTORY_PAT` is set; a `GITHUB_TOKEN` push does not restart workflows.
 
 Merges performed by the workflow use `GITHUB_TOKEN`, and GitHub's recursion
 guard means those merges don't trigger workflows on the base branch. CI ran

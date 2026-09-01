@@ -2,7 +2,7 @@
 # conversation is. Call from a thin workflow on issue_comment (see
 # templates/factory-commands.yml).
 #
-#   /factory review                     on a PR: run the Codex review on it
+#   /factory review                     on a PR: run the review agent on it
 #   /factory implement [model] [effort] on an issue: treat the issue as the
 #                                       work order — a plan file, an
 #                                       implementation, a PR that closes it
@@ -19,9 +19,22 @@ on:
       runner:
         type: string
         default: ubuntu-latest
-      default_model:
+      agent:
+        description: "Agent for implement/revise: claude, codex or muse"
         type: string
-        default: opus
+        default: claude
+      review_agent:
+        description: "Agent for /factory review: claude, codex or muse"
+        type: string
+        default: codex
+      review_model:
+        description: "Model for /factory review. Empty means the review agent's pinned default."
+        type: string
+        default: ""
+      default_model:
+        description: "Model for implement/revise when the comment names none. Empty means the agent's default."
+        type: string
+        default: ""
       default_effort:
         type: string
         default: medium
@@ -39,8 +52,12 @@ on:
         default: CI
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN:
-        required: true
+        required: false
+      OPENAI_API_KEY:
+        required: false
       CODEX_AUTH_JSON:
+        required: false
+      MUSE_API_KEY:
         required: false
       FACTORY_PAT:
         required: false
@@ -65,9 +82,18 @@ jobs:
           set -- $BODY
           cmd="${2:-}"
           case "$cmd" in review|implement|revise) ;; *) echo "::notice::Unknown factory command '$cmd' — ignoring."; cmd="" ;; esac
+          # The model token is provider-specific (opus, gpt-5.6-luna,
+          # muse-spark-1.2, ...), so accept any plausible model id; efforts
+          # are the factory's own scale, so they stay a closed list. Order
+          # doesn't matter: each token lands where it parses.
           model=""; effort=""
-          case "${3:-}" in haiku|sonnet|opus) model="$3" ;; esac
-          case "${4:-}" in low|medium|high|xhigh|max) effort="$4" ;; esac
+          for tok in "${3:-}" "${4:-}"; do
+            case "$tok" in
+              "") ;;
+              low|medium|high|xhigh|max) effort="$tok" ;;
+              *) if printf '%s' "$tok" | grep -Eq '^[A-Za-z0-9._-]+$'; then model="$tok"; else echo "::notice::Ignoring unrecognised argument '$tok'."; fi ;;
+            esac
+          done
           echo "cmd=$cmd" >> "$GITHUB_OUTPUT"
           echo "model=$model" >> "$GITHUB_OUTPUT"
           echo "effort=$effort" >> "$GITHUB_OUTPUT"
@@ -87,6 +113,8 @@ jobs:
     with:
       pr: ${{ github.event.issue.number }}
       ci_workflow: ${{ inputs.ci_workflow }}
+      agent: ${{ inputs.review_agent }}
+      model: ${{ inputs.review_model }}
 
   implement:
     name: "Implement issue #${{ github.event.issue.number }}"
@@ -112,12 +140,18 @@ jobs:
         if: inputs.setup != ''
         run: ${{ inputs.setup }}
 
-      - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
+      - name: Install the agent
+        env:
+          AGENT: ${{ inputs.agent }}
+        run: .factory/scripts/run-agent.sh install
 
       - name: Implement the issue
         env:
+          AGENT: ${{ inputs.agent }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
           GH_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN || github.token }}
           PROMPT: |
             You are a headless dispatched run: nobody is watching and nothing
@@ -144,16 +178,13 @@ jobs:
           git config user.email "factory@users.noreply.github.com"
           base_tools="Glob,Grep,LS,Read,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git branch:*),Bash(git add:*),Bash(git commit:*),Bash(git rm:*),Bash(git worktree:*),Bash(git fetch:*),Bash(git checkout:*),Bash(.factory/scripts/git-push.sh:*),Bash(gh pr create:*),Bash(gh pr list:*),Bash(gh issue view:*)"
           extra="${{ inputs.verify_tools }}"
-          claude -p "$PROMPT" \
-            --model "${{ needs.route.outputs.model || inputs.default_model }}" \
-            --effort "${{ needs.route.outputs.effort || inputs.default_effort }}" \
-            --output-format stream-json --verbose \
-            --max-turns "${{ inputs.max_turns }}" \
-            --permission-mode acceptEdits \
-            --allowedTools "${base_tools}${extra:+,$extra}" \
-            --disallowedTools "WebSearch,WebFetch" \
-            | tee "$RUNNER_TEMP/transcript.jsonl" \
-            | node .factory/scripts/render-stream.mjs
+          MODEL="${{ needs.route.outputs.model || inputs.default_model }}" \
+          EFFORT="${{ needs.route.outputs.effort || inputs.default_effort }}" \
+          MAX_TURNS="${{ inputs.max_turns }}" \
+          ALLOWED_TOOLS="${base_tools}${extra:+,$extra}" \
+          TRANSCRIPT="$RUNNER_TEMP/transcript.jsonl" \
+          FACTORY_DIR=.factory \
+            .factory/scripts/run-agent.sh run
 
       - name: Keep the transcript
         if: always()
@@ -192,12 +223,18 @@ jobs:
         if: inputs.setup != ''
         run: ${{ inputs.setup }}
 
-      - name: Install Claude Code
-        run: npm install -g @anthropic-ai/claude-code
+      - name: Install the agent
+        env:
+          AGENT: ${{ inputs.agent }}
+        run: .factory/scripts/run-agent.sh install
 
       - name: Revise the PR
         env:
+          AGENT: ${{ inputs.agent }}
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}
           GH_TOKEN: ${{ secrets.FACTORY_PAT || secrets.GITHUB_TOKEN || github.token }}
           PROMPT: |
             You are a headless dispatched run: nobody is watching and nothing
@@ -232,16 +269,13 @@ jobs:
           git config user.email "factory@users.noreply.github.com"
           base_tools="Glob,Grep,LS,Read,Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git branch:*),Bash(git add:*),Bash(git commit:*),Bash(git rm:*),Bash(git worktree:*),Bash(git fetch:*),Bash(git checkout:*),Bash(.factory/scripts/git-push.sh:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh api repos/*)"
           extra="${{ inputs.verify_tools }}"
-          claude -p "$PROMPT" \
-            --model "${{ needs.route.outputs.model || inputs.default_model }}" \
-            --effort "${{ needs.route.outputs.effort || inputs.default_effort }}" \
-            --output-format stream-json --verbose \
-            --max-turns "${{ inputs.max_turns }}" \
-            --permission-mode acceptEdits \
-            --allowedTools "${base_tools}${extra:+,$extra}" \
-            --disallowedTools "WebSearch,WebFetch" \
-            | tee "$RUNNER_TEMP/transcript.jsonl" \
-            | node .factory/scripts/render-stream.mjs
+          MODEL="${{ needs.route.outputs.model || inputs.default_model }}" \
+          EFFORT="${{ needs.route.outputs.effort || inputs.default_effort }}" \
+          MAX_TURNS="${{ inputs.max_turns }}" \
+          ALLOWED_TOOLS="${base_tools}${extra:+,$extra}" \
+          TRANSCRIPT="$RUNNER_TEMP/transcript.jsonl" \
+          FACTORY_DIR=.factory \
+            .factory/scripts/run-agent.sh run
 
       - name: Keep the transcript
         if: always()

@@ -1,4 +1,7 @@
-# Codex reviews factory PRs; clean + green CI auto-merges them.
+# A second agent reviews factory PRs; clean + green CI auto-merges them.
+# Pick a different vendor from the one that implements — that independence
+# is the point. Secrets are passed explicitly (repo- or org-level), not
+# inherited wholesale; pass only what the chosen review agent needs.
 name: Factory Review
 on:
   pull_request:
@@ -9,7 +12,19 @@ permissions:
 jobs:
   review:
     uses: RatulMaharaj/factory/.github/workflows/review.yml@v1
-    secrets: inherit
+    secrets:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      # CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}           # codex subscription fallback
+      # CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }} # if agent or revise_agent is claude
+      # MUSE_API_KEY: ${{ secrets.MUSE_API_KEY }}                 # if agent or revise_agent is muse
+      FACTORY_PAT: ${{ secrets.FACTORY_PAT }}
     with:
       ci_workflow: CI
+      agent: codex # claude | codex | muse — who reviews
+      # model: gpt-5.6-luna    # pin a model; empty = the agent's pinned default
+      # effort: high           # low | medium | high | xhigh | max
+      # auto_merge: false      # default true: clean + green CI squash-merges
+      # auto_revise: true      # default false: FINDINGS dispatches ONE revise run
+      # revise_agent: claude   # who does the auto-revision (revise_model / revise_effort to tune)
+      # runner / setup / verify_tools / max_turns: for the auto-revise run, same as your Factory workflow
       # machine_account: LoopedAgent
